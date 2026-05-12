@@ -132,7 +132,7 @@ def run_scrape():
         "currency", "interval", "description",
     ]
     existing = [c for c in keep_cols if c in combined.columns]
-    result = combined[existing].to_dict("records")
+    result = combined[existing].where(pd.notna(combined[existing]), other=None).to_dict("records")
 
     with open(CACHE_FILE, "w") as f:
         json.dump(result, f, default=str)
@@ -158,7 +158,8 @@ def index():
             status_code=202,
         )
     with open(CACHE_FILE) as f:
-        return json.load(f)
+        data = json.load(f)
+    return JSONResponse(content=data)
 
 
 @app.get("/refresh")
