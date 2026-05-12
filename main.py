@@ -45,8 +45,8 @@ KEEP_COLS = [
 
 
 def make_hash(row) -> str:
-    title = re.sub(r'[^a-z0-9]', '', (row.get('title') or '').lower())
-    company = re.sub(r'[^a-z0-9]', '', (row.get('company') or '').lower())
+    title = re.sub(r'[^a-z0-9]', '', str(row.get('title') or '').lower())
+    company = re.sub(r'[^a-z0-9]', '', str(row.get('company') or '').lower())
     return hashlib.md5(f"{title}|{company}".encode()).hexdigest()
 
 
