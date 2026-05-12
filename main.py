@@ -1,69 +1,93 @@
-import csv
+import json
+import os
+import threading
+
 import pandas as pd
+from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from jobspy import scrape_jobs
-from apscheduler.schedulers.background import BackgroundScheduler
-import json, os
 
 app = FastAPI()
 CACHE_FILE = "/tmp/jobs_cache.json"
 
+INDEED_TARGETS = [
+    {"country": "cyprus",      "location": "Limassol"},
+    {"country": "malta",       "location": "Malta"},
+    {"country": "netherlands", "location": "Amsterdam"},
+    {"country": "spain",       "location": "Barcelona"},
+    {"country": "portugal",    "location": "Lisbon"},
+    {"country": "germany",     "location": "Germany"},
+]
 
-# --- scraper functions (без изменений) ---
+SEARCH_TERMS = [
+    "PHP Laravel developer",
+    "Laravel Symfony backend engineer",
+]
+
+GOOGLE_QUERIES = [
+    "Laravel developer Cyprus relocation",
+    "PHP backend developer Malta",
+    "Laravel Symfony developer Amsterdam",
+    "PHP developer Barcelona relocation",
+]
+
 
 def scrape_linkedin() -> pd.DataFrame:
     dfs = []
-    for term in ["PHP Laravel developer", "Laravel Symfony backend engineer"]:
-        df = scrape_jobs(
-            site_name=["linkedin"], search_term=term, location="Cyprus",
-            results_wanted=25, hours_old=72, job_type="fulltime",
-            linkedin_fetch_description=True, description_format="markdown", verbose=1,
-        )
-        dfs.append(df)
+    for term in SEARCH_TERMS:
+        try:
+            df = scrape_jobs(
+                site_name=["linkedin"],
+                search_term=term,
+                location="Cyprus",
+                results_wanted=50,
+                hours_old=168,
+                linkedin_fetch_description=True,
+                description_format="markdown",
+                verbose=1,
+            )
+            dfs.append(df)
+        except Exception as e:
+            print(f"[LinkedIn:{term}] {e}")
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 
 def scrape_indeed_all() -> pd.DataFrame:
-    targets = [
-        {"country": "cyprus",      "location": "Limassol"},
-        {"country": "malta",       "location": "Malta"},
-        {"country": "netherlands", "location": "Amsterdam"},
-        {"country": "spain",       "location": "Barcelona"},
-        {"country": "portugal",    "location": "Lisbon"},
-        {"country": "germany",     "location": "Germany"},
-    ]
     dfs = []
-    for target in targets:
-        for term in ["PHP Laravel developer", "Laravel Symfony backend engineer"]:
+    for target in INDEED_TARGETS:
+        for term in SEARCH_TERMS:
             try:
                 df = scrape_jobs(
-                    site_name=["indeed"], search_term=term,
-                    location=target["location"], country_indeed=target["country"],
-                    results_wanted=20, hours_old=72,
-                    description_format="markdown", verbose=1,
+                    site_name=["indeed"],
+                    search_term=term,
+                    location=target["location"],
+                    country_indeed=target["country"],
+                    results_wanted=30,
+                    hours_old=168,
+                    description_format="markdown",
+                    verbose=1,
                 )
                 dfs.append(df)
             except Exception as e:
-                print(f"[Indeed:{target['country']}] {e}")
+                print(f"[Indeed:{target['country']}:{term}] {e}")
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 
 def scrape_google() -> pd.DataFrame:
-    queries = [
-        "PHP Laravel developer jobs Cyprus OR Malta OR Netherlands relocation visa sponsorship",
-        "Symfony backend engineer jobs Limassol OR Amsterdam OR Barcelona relocation",
-    ]
     dfs = []
-    for q in queries:
+    for q in GOOGLE_QUERIES:
         try:
             df = scrape_jobs(
-                site_name=["google"], google_search_term=q,
-                results_wanted=20, description_format="markdown", verbose=1,
+                site_name=["google"],
+                google_search_term=q,
+                results_wanted=20,
+                description_format="markdown",
+                verbose=1,
             )
             dfs.append(df)
         except Exception as e:
-            print(f"[Google] {e}")
+            print(f"[Google:{q}] {e}")
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 
@@ -78,11 +102,12 @@ def deduplicate(df: pd.DataFrame) -> pd.DataFrame:
 def filter_relevant(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
-    pattern = "|".join(["php", "laravel", "symfony", "backend", "full stack", "fullstack"])
+    pattern = "|".join([
+        "php", "laravel", "symfony", "backend", "full.?stack",
+        "software engineer", "web developer",
+    ])
     return df[df["title"].str.lower().str.contains(pattern, na=False)].reset_index(drop=True)
 
-
-# --- фоновый скрейпинг ---
 
 def run_scrape():
     print("[Scheduler] Starting scrape...")
@@ -122,8 +147,6 @@ scheduler.start()
 
 @app.on_event("startup")
 def startup():
-    # Первый прогон при старте контейнера (в фоне, не блокирует старт)
-    import threading
     threading.Thread(target=run_scrape, daemon=True).start()
 
 
@@ -140,7 +163,5 @@ def index():
 
 @app.get("/refresh")
 def refresh():
-    """Ручной запуск скрейпинга (не ждёт завершения)."""
-    import threading
     threading.Thread(target=run_scrape, daemon=True).start()
     return {"status": "started"}
