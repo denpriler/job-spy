@@ -1,6 +1,9 @@
+import hashlib
 import json
 import os
+import re
 import threading
+from datetime import datetime, timedelta
 
 import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -10,6 +13,8 @@ from jobspy import scrape_jobs
 
 app = FastAPI()
 CACHE_FILE = "/tmp/jobs_cache.json"
+CACHE_MAX_AGE_HOURS = 12  # кеш старше этого — перезаписываем полностью
+CACHE_MAX_ITEMS = 500      # максимум записей в кеше
 
 INDEED_TARGETS = [
     {"country": "cyprus",      "location": "Limassol"},
@@ -31,6 +36,18 @@ GOOGLE_QUERIES = [
     "Laravel Symfony developer Amsterdam",
     "PHP developer Barcelona relocation",
 ]
+
+KEEP_COLS = [
+    "site", "job_url", "title", "company", "location",
+    "job_type", "date_posted", "min_amount", "max_amount",
+    "currency", "interval", "description", "content_hash",
+]
+
+
+def make_hash(row) -> str:
+    title = re.sub(r'[^a-z0-9]', '', (row.get('title') or '').lower())
+    company = re.sub(r'[^a-z0-9]', '', (row.get('company') or '').lower())
+    return hashlib.md5(f"{title}|{company}".encode()).hexdigest()
 
 
 def scrape_linkedin() -> pd.DataFrame:
@@ -91,14 +108,6 @@ def scrape_google() -> pd.DataFrame:
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 
-def deduplicate(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-    df = df.drop_duplicates(subset=["job_url"], keep="first")
-    df = df.drop_duplicates(subset=["title", "company"], keep="first")
-    return df.reset_index(drop=True)
-
-
 def filter_relevant(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -107,6 +116,59 @@ def filter_relevant(df: pd.DataFrame) -> pd.DataFrame:
         "software engineer", "web developer",
     ])
     return df[df["title"].str.lower().str.contains(pattern, na=False)].reset_index(drop=True)
+
+
+def clean_value(v):
+    """None вместо NaN/NaT для JSON-сериализации."""
+    if v is None:
+        return None
+    if isinstance(v, float) and (v != v):  # NaN check
+        return None
+    if isinstance(v, pd.Timestamp):
+        return v.isoformat()
+    return v
+
+
+def merge_with_cache(new_records: list[dict]) -> list[dict]:
+    """
+    Мёрджим новые записи со старым кешем:
+    - дедуплицируем по content_hash
+    - выкидываем записи старше CACHE_MAX_AGE_HOURS
+    - обрезаем до CACHE_MAX_ITEMS
+    """
+    existing = []
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE) as f:
+                data = json.load(f)
+                cached_at_str = data.get("cached_at")
+                existing = data.get("jobs", [])
+
+                # если кеш слишком старый — не берём старые записи, только новые
+                if cached_at_str:
+                    cached_at = datetime.fromisoformat(cached_at_str)
+                    if datetime.utcnow() - cached_at > timedelta(hours=CACHE_MAX_AGE_HOURS):
+                        existing = []
+        except Exception as e:
+            print(f"[Cache] Failed to read cache: {e}")
+            existing = []
+
+    # индексируем существующие по hash для быстрого поиска
+    existing_by_hash = {r["content_hash"]: r for r in existing if r.get("content_hash")}
+
+    # добавляем новые, не перезаписывая уже существующие
+    for record in new_records:
+        h = record.get("content_hash")
+        if h and h not in existing_by_hash:
+            existing_by_hash[h] = record
+
+    merged = list(existing_by_hash.values())
+
+    # сортируем по дате (свежие сверху) и обрезаем
+    merged.sort(key=lambda r: r.get("date_posted") or "", reverse=True)
+    merged = merged[:CACHE_MAX_ITEMS]
+
+    return merged
 
 
 def run_scrape():
@@ -123,21 +185,39 @@ def run_scrape():
         return
 
     combined = pd.concat(frames, ignore_index=True)
-    combined = deduplicate(combined)
+
+    # фильтрация по title
     combined = filter_relevant(combined)
 
-    keep_cols = [
-        "site", "job_url", "title", "company", "location",
-        "job_type", "date_posted", "min_amount", "max_amount",
-        "currency", "interval", "description",
-    ]
-    existing = [c for c in keep_cols if c in combined.columns]
-    result = combined[existing].where(pd.notna(combined[existing]), other=None).to_dict("records")
+    # оставляем нужные колонки
+    existing_cols = [c for c in KEEP_COLS if c in combined.columns]
+    combined = combined[existing_cols]
 
+    # дедупликация внутри текущего прогона
+    combined["content_hash"] = combined.apply(
+        lambda row: make_hash(row.to_dict()), axis=1
+    )
+    combined = combined.drop_duplicates(subset=["content_hash"], keep="first")
+    combined = combined.drop_duplicates(subset=["job_url"], keep="first")
+
+    # сериализуем в list[dict], заменяя NaN → None
+    new_records = []
+    for record in combined.to_dict("records"):
+        new_records.append({k: clean_value(v) for k, v in record.items()})
+
+    # мёрджим с кешем
+    merged = merge_with_cache(new_records)
+
+    # сохраняем
+    cache_data = {
+        "cached_at": datetime.utcnow().isoformat(),
+        "count": len(merged),
+        "jobs": merged,
+    }
     with open(CACHE_FILE, "w") as f:
-        json.dump(result, f, default=str)
+        json.dump(cache_data, f, default=str, ensure_ascii=False)
 
-    print(f"[Scheduler] Done. {len(result)} jobs cached.")
+    print(f"[Scheduler] Done. {len(new_records)} new scraped, {len(merged)} total in cache.")
 
 
 scheduler = BackgroundScheduler()
