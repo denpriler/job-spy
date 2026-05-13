@@ -21,7 +21,7 @@ services:
 
   n8n:
     image: n8nio/n8n:1.111.0
-    container_name: n8-main
+    container_name: n8n-main
     restart: unless-stopped
     environment:
       - DB_TYPE=postgresdb
