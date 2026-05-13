@@ -3,7 +3,7 @@ import json
 import os
 import re
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as date_type
 
 import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -119,12 +119,11 @@ def filter_relevant(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def clean_value(v):
-    """None вместо NaN/NaT для JSON-сериализации."""
     if v is None:
         return None
-    if isinstance(v, float) and (v != v):  # NaN check
+    if isinstance(v, float) and (v != v):
         return None
-    if isinstance(v, pd.Timestamp):
+    if isinstance(v, (pd.Timestamp, date_type)):
         return v.isoformat()
     return v
 
